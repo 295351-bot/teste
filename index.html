@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Fuga da Ilha 2D</title>
+    <style>
+        body { margin: 0; padding: 0; background: #002244; color: white; font-family: monospace; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+        #menu { position: absolute; background: rgba(0,0,0,0.95); padding: 25px; border: 2px solid #555; text-align: center; border-radius: 8px; z-index: 10; width: 320px; }
+        input, select, button { margin: 8px 0; padding: 10px; font-size: 14px; background: #222; color: #fff; border: 1px solid #777; width: 100%; box-sizing: border-box; }
+        button { cursor: pointer; background: #28a745; font-weight: bold; border: none; }
+        button:hover { background: #218838; }
+        #canvas { border: 4px solid #001122; display: none; background: #004488; }
+        #ui { position: absolute; top: 15px; left: 15px; font-size: 18px; pointer-events: none; text-shadow: 2px 2px #000; display: none; }
+        #death { display: none; position: absolute; background: rgba(180,0,0,0.85); width: 100%; height: 100%; font-size: 28px; text-align: center; justify-content: center; align-items: center; flex-direction: column; z-index: 9; }
+    </style>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+<div id="ui">Missões: <span id="p-count">0</span>/3 | <span id="status-text">Complete os puzzles com ESPAÇO</span></div>
+<div id="death">
+    TUBARÃO TE DEVOROU NA ÁGUA!<br>
+    <span style="font-size:16px; margin-top:10px;">Você está no modo espectador.</span>
+</div>
+
+<div id="menu">
+    <h2>FUGA DA ILHA</h2>
+    <label>Seu Nome:</label>
+    <input type="text" id="username" value="Jogador1">
+    
+    <label>Cor da Camisa:</label>
+    <select id="charColor">
+        <option value="#ff6600">Laranja (Original)</option>
+        <option value="#0066ff">Azul</option>
+        <option value="#33cc33">Verde</option>
+        <option value="#cc0000">Vermelho</option>
+        <option value="#9900cc">Roxo</option>
+    </select>
+
+    <button onclick="startHost()">CRIAR SERVIDOR (HOST)</button>
+    <input type="text" id="roomCode" placeholder="Código da Sala">
+    <button onclick="startJoin()" style="background:#007bff">ENTRAR NA SALA</button>
+    <div id="codeDisplay" style="margin-top:10px; color:#00ffcc; word-break: break-all;"></div>
+</div>
+
+<canvas id="canvas" width="900" height="700"></canvas>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let myId, peer, conns = [];
+let isHost = false;
+let alive = true;
+let keys = {};
+let puzzlesDone = 0;
+let swatReady = false;
+
+// Estado do jogo
+let me = { x: 450, y: 350, name: '', color: '#ff6600', angle: 0, step: 0 };
+let epstein = { x: 120, y: 120, angle: 0, step: 0 };
+let shark = { x: -100, y: -100, active: false, targetX: 0, targetY: 0 };
+let players = {};
+let puzzles = [{x: 250, y: 200, done: false}, {x: 650, y: 200, done: false}, {x: 450, y: 500, done: false}];
+
+function initGame() {
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('ui').style.display = 'block';
+    canvas.style.display = 'block';
+
+    window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+    window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+    if (isHost) {
+        setInterval(() => {
+            // Epstein persegue o jogador Host
+            let dx = me.x - epstein.x;
+            let dy = me.y - epstein.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist > 5) {
+                epstein.x += (dx/dist) * 1.8;
+                epstein.y += (dy/dist) * 1.8;
+                epstein.angle = Math.atan2(dy, dx);
+                epstein.step += 0.2;
+                sendAll({ type: 'epstein', x: epstein.x, y: epstein.y, angle: epstein.angle, step: epstein.step });
+            }
+        }, 30);
+    }
+
+    requestAnimationFrame(loop);
+}
+
+function startHost() {
+    isHost = true;
+    peer = new Peer();
+    peer.on('open', id => {
+        myId = id;
+        document.getElementById('codeDisplay').innerText = "CÓDIGO: " + id;
+        me.name = document.getElementById('username').value;
+        me.color = document.getElementById('charColor').value;
+        initGame();
+    });
+    peer.on('connection', c => {
+        conns.push(c);
+        c.on('data', handleData);
+    });
+}
+
+function startJoin() {
+    let code = document.getElementById('roomCode').value.trim();
+    if(!code) return alert("Digite o código!");
+    peer = new Peer();
+    peer.on('open', id => {
+        myId = id;
+        me.name = document.getElementById('username').value;
+        me.color = document.getElementById('charColor').value;
+        let c = peer.connect(code);
+        conns.push(c);
+        c.on('data', handleData);
+        initGame();
+    });
+}
+
+function sendAll(data) {
+    conns.forEach(c => { if(c.open) c.send(data); });
+}
+
+function handleData(data) {
+    if(data.type === 'move') players[data.id] = data;
+    if(data.type === 'epstein') epstein = { x: data.x, y: data.y, angle: data.angle, step: data.step };
+    if(data.type === 'puzzle') {
+        puzzles[data.index].done = true;
+        puzzlesDone++;
+        document.getElementById('p-count').innerText = puzzlesDone;
+        if(puzzlesDone >= 3) triggerSwat();
+    }
+}
+
+function triggerSwat() {
+    swatReady = true;
+    document.getElementById('status-text').innerText = "SWAT CHEGOU! VÁ PARA O HELICÓPTERO!";
+}
+
+function drawCharacter(x, y, color, name, angle, step) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+
+    // Movimento das perninhas
+    let legOffset = Math.sin(step) * 6;
+
+    // Pernas (Cinza)
+    ctx.fillStyle = '#333';
+    ctx.fillRect(-6 + legOffset, -12, 5, 8);
+    ctx.fillRect(-6 - legOffset, 4, 5, 8);
+
+    // Corpo / Ombros visto de cima
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 10, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cabeça
+    ctx.fillStyle = '#ffcc99';
+    ctx.beginPath();
+    ctx.arc(0, 0, 7, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cabelo
+    ctx.fillStyle = '#222';
+    ctx.beginPath();
+    ctx.arc(-2, 0, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    // Nome acima do boneco
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '12px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(name, x, y - 20);
+}
+
+function loop() {
+    // 1. Lógica do Jogador Local
+    if (alive) {
+        let dx = 0, dy = 0;
+        if (keys['w'] || keys['arrowup']) dy -= 2.5;
+        if (keys['s'] || keys['arrowdown']) dy += 2.5;
+        if (keys['a'] || keys['arrowleft']) dx -= 2.5;
+        if (keys['d'] || keys['arrowright']) dx += 2.5;
+
+        if (dx !== 0 || dy !== 0) {
+            me.x += dx;
+            me.y += dy;
+            me.angle = Math.atan2(dy, dx);
+            me.step += 0.2; // Faz as pernas mexerem
+
+            sendAll({
+                type: 'move', id: myId, x: me.x, y: me.y,
+                name: me.name, color: me.color, angle: me.angle, step: me.step
+            });
+        }
+
+        // Queda na água (Limites da ilha)
+        if (me.x < 80 || me.x > 820 || me.y < 80 || me.y > 620) {
+            alive = false;
+            shark.active = true;
+            shark.x = me.x - 50;
+            shark.y = me.y - 50;
+            shark.targetX = me.x;
+            shark.targetY = me.y;
+            document.getElementById('death').style.display = 'flex';
+        }
+
+        // Interação com Puzzles (Tecla Espaço)
+        puzzles.forEach((p, idx) => {
+            if (!p.done) {
+                let dist = Math.sqrt((me.x - p.x)**2 + (me.y - p.y)**2);
+                if (dist < 30 && keys[' ']) {
+                    p.done = true;
+                    puzzlesDone++;
+                    document.getElementById('p-count').innerText = puzzlesDone;
+                    sendAll({ type: 'puzzle', index: idx });
+                    if (puzzlesDone >= 3) triggerSwat();
+                }
+            }
+        });
+    }
+
+    // --- RENDERIZAÇÃO 2D ---
+
+    // 1. Água (Fundo)
+    ctx.fillStyle = '#004488';
+    ctx.fillRect(0, 0, 900, 700);
+
+    // 2. Ilha (Grama em formato retangular central)
+    ctx.fillStyle = '#228b22';
+    ctx.fillRect(80, 80, 740, 540);
+    ctx.strokeStyle = '#e6c280'; // Areia nas bordas
+    ctx.lineWidth = 12;
+    ctx.strokeRect(80, 80, 740, 540);
+
+    // 3. Puzzles
+    puzzles.forEach(p => {
+        ctx.fillStyle = p.done ? '#00ff00' : '#ffff00';
+        ctx.fillRect(p.x - 12, p.y - 12, 24, 24);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(p.x - 12, p.y - 12, 24, 24);
+    });
+
+    // 4. SWAT (Helicóptero de Resgate)
+    if (swatReady) {
+        ctx.fillStyle = '#111111';
+        ctx.beginPath();
+        ctx.arc(450, 350, 35, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Hélice
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(450 - 50, 350);
+        ctx.lineTo(450 + 50, 350);
+        ctx.moveTo(450, 350 - 50);
+        ctx.lineTo(450, 350 + 50);
+        ctx.stroke();
+    }
+
+    // 5. Outros Jogadores
+    for (let id in players) {
+        let p = players[id];
+        drawCharacter(p.x, p.y, p.color, p.name, p.angle, p.step);
+    }
+
+    // 6. Meu Jogador
+    if (alive) {
+        drawCharacter(me.x, me.y, me.color, me.name, me.angle, me.step);
+    }
+
+    // 7. Bot Epstein (Caçador em roupa cinza)
+    drawCharacter(epstein.x, epstein.y, '#444444', 'EPSTEIN', epstein.angle, epstein.step);
+
+    // 8. Animação do Tubarão (Cutscene ao cair na água)
+    if (shark.active) {
+        let dx = shark.targetX - shark.x;
+        let dy = shark.targetY - shark.y;
+        shark.x += dx * 0.1;
+        shark.y += dy * 0.1;
+
+        // Barbatanas do Tubarão (Triângulo cinza na água)
+        ctx.fillStyle = '#111';
+        ctx.beginPath();
+        ctx.moveTo(shark.x, shark.y - 15);
+        ctx.lineTo(shark.x - 10, shark.y + 10);
+        ctx.lineTo(shark.x + 10, shark.y + 10);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
